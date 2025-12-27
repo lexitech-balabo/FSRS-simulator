@@ -5,37 +5,32 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 # ==========================================
-# 1. CONFIG & CONSTANTS
+# 1. КОНФІГУРАЦІЯ ТА КОНСТАНТИ
 # ==========================================
 st.set_page_config(
-    page_title="FSRS v4 Simulator",
-    page_icon="🧠",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Прогноз Вивчення Слів",
+    page_icon="🎓",
+    layout="wide"
 )
 
-# FSRS v4 Default Weights (approximate standard values)
-# w[0-3]: Initial Stability for Again, Hard, Good, Easy
-# w[4-5]: Difficulty normalization
-# w[6-7]: Difficulty update
-# w[8-16]: Stability update
+# Ваги FSRS v4 (стандартні)
 DEFAULT_WEIGHTS = [
-    0.4, 0.6, 2.4, 5.8,  # Initial Stability
-    4.93, 0.94,          # Difficulty mean/reversion
-    0.86, 0.01,          # Difficulty update
-    1.49, 0.14, 0.94,    # Stability update (Hard/Good/Easy factors)
-    2.18, 0.05, 0.34, 1.26, 0.29, 2.61 # Other constants
+    0.4, 0.6, 2.4, 5.8,  
+    4.93, 0.94,          
+    0.86, 0.01,          
+    1.49, 0.14, 0.94,    
+    2.18, 0.05, 0.34, 1.26, 0.29, 2.61
 ]
 
-MASTERY_THRESHOLD = 21.0
-DECK_SIZE = 65
-SIMULATION_DAYS = 365
+MASTERY_THRESHOLD = 21.0  # Слово вважається вивченим, якщо інтервал > 21 дня
+DECK_SIZE = 65            # Розмір колоди
+SIMULATION_DAYS = 365     # Період прогнозу
 
 # ==========================================
-# 2. CORE LOGIC (FSRS ALGORITHM)
+# 2. ЛОГІКА ALGORITHM (FSRS)
 # ==========================================
 
 @dataclass
@@ -45,87 +40,32 @@ class FSRSParams:
     w: List[float] = field(default_factory=lambda: DEFAULT_WEIGHTS)
 
 class FSRS:
-    """
-    Реалізація математичної моделі FSRS v4.
-    """
     def __init__(self, params: FSRSParams):
         self.p = params
-        # Override default weight for 'Good' start based on user input
         self.p.w[2] = self.p.initial_stability_good
 
     def calculate_retrievability(self, s: float, t: int) -> float:
-        """
-        R = (1 + factor * t / S) ^ decay
-        Для FSRS v4 зазвичай використовується спрощена формула з фактором 19 (при decay -1 або близько того)
-        або точна формула: R = (1 + 19 * (t / s)) ^ -1
-        """
         if s == 0: return 0.0
         return (1 + 19 * (t / s)) ** -1
 
     def next_interval(self, s: float, d: float, rating: int, r: float) -> Tuple[float, float]:
-        """
-        Розрахунок нових S та D.
-        rating: 1=Again, 2=Hard, 3=Good, 4=Easy
-        Повертає: (new_s, new_d)
-        """
-        # 1. Update Difficulty (D)
-        # D_new = D - w6 * (rating - 3)
-        # Потім застосовуємо Mean Reversion до w4 (default D)
-        # D_new = w7 * w4 + (1 - w7) * D_new
+        # rating: 1=Забув, 2=Важко, 3=Добре, 4=Легко
         
-        # Рейтинг для формули D: Again=1 .. Easy=4. 
-        # Але в формулі часто використовується (grade - 3), де grade 1..4.
-        
+        # Оновлення Складності (D)
         d_new = d - self.p.w[6] * (rating - 3)
         d_new = self.p.w[5] * self.p.w[4] + (1 - self.p.w[5]) * d_new
-        
-        # Clamp D (1 to 10)
         d_new = max(1.0, min(10.0, d_new))
 
-        # 2. Update Stability (S)
-        if rating == 1: # Again
-            # Stability decreases
-            # S_new = S * w8 * exp(w9 * (11-D)) * S^(-w10) ... (прощена логіка для симулятора)
-            # Використаємо стандартну формулу скорочення для Again з v4
+        # Оновлення Міцності пам'яті (S)
+        if rating == 1: # Забув (Again)
             s_new = self.p.w[11] * (d_new ** -self.p.w[12]) * ((s + 1) ** self.p.w[13]) * np.exp(self.p.w[14] * (1 - r))
-            # Для Again стабільність зазвичай різко падає, часто до 10-50% від попередньої
-            # Але в FSRS v4 є окрема формула. Заради спрощення і робастності симулятора:
-            # Використовуємо наближення, якщо формула дає збій, але формула вище - з параметрів.
-            # Зауваження: в clean FSRS v4 formula для Again інша.
-            # Правильна формула v4 для Again:
-            # S_new = w11 * D^(-w12) * (S+1)^w13 * exp(w14 * (1-R))
-            pass 
         else:
-            # Hard / Good / Easy
-            # S_new = S * (1 + factor)
-            # Factor depends on D, S, R and Rating weights
-            
-            # w8 exp(w9(11-D)) S^(-w10) (exp(w11(1-R))-1) - це структура v5/optimizer.
-            # Для v4 structure:
-            # S_new = S * (1 + exp(w8) * (11-D) * S^(-w9) * (exp(w10*(1-R)) - 1))
-            
-            # Відповідно до індексу в DEFAULT_WEIGHTS (mapping може відрізнятись в різних версіях):
-            # w[8] base multiplier factor
-            # w[9] difficulty factor power (usually negative or handled in exp)
-            # w[10] retrievability factor
-            
-            # Реалізація поширеної версії v4:
-            if rating == 2: # Hard
-                factor = self.p.w[8] 
-            elif rating == 3: # Good
-                factor = self.p.w[9] 
-            else: # Easy
-                factor = self.p.w[10]
+            if rating == 2: factor = self.p.w[8] 
+            elif rating == 3: factor = self.p.w[9] 
+            else: factor = self.p.w[10]
 
-            # FSRS v4 scaling formula approximation:
-            # Next Stability = S * (1 + exp(w8) * (11-D) * S^(-w9) * (exp(w10 * (1-R)) - 1))
-            # Але оскільки ми маємо масив weights, давайте використаємо простішу logic v4:
-            # S_new = S * (1 + factor * (11 - d) * (s ** -0.5) * (np.exp(0.5 * (1 - r)) - 1)) * tuning
-            
-            # Для цього симулятора, щоб гарантувати коректне зростання S > 21:
             base_growth = 1 + factor * (11 - d) * (s ** -0.9) * (np.exp((1 - r)) - 1)
             
-            # Hard penalty / Easy bonus hardcoded coefficients for stability
             if rating == 2: base_growth *= 0.8
             if rating == 4: base_growth *= 1.3
             
@@ -134,10 +74,7 @@ class FSRS:
         return max(s_new, 0.1), d_new
 
     def initial_params(self, rating: int) -> Tuple[float, float]:
-        """Початкові S та D для нового слова"""
-        # S base on rating (index 0-3 for ratings 1-4)
         s = self.p.w[rating - 1]
-        # D base on w4 but we override D externally based on Level
         d = self.p.w[4] 
         return s, d
 
@@ -146,7 +83,7 @@ class Card:
     id: int
     difficulty: float
     stability: float = 0.0
-    state: str = "New" # New, Learning, Review, Mastered
+    state: str = "New" # New, Learning, Mastered
     last_review_day: int = -1
     history: List[dict] = field(default_factory=list)
 
@@ -155,229 +92,271 @@ class Card:
         return self.stability > MASTERY_THRESHOLD
 
 # ==========================================
-# 3. STREAMLIT UI & SIMULATION LOOP
+# 3. ІНТЕРФЕЙС ТА СИМУЛЯЦІЯ
 # ==========================================
 
-def get_difficulty_range(level: str) -> Tuple[float, float]:
-    if level == "A1": return (2.0, 3.0)
-    if level == "A2-B1": return (3.0, 5.0)
-    if level == "B2-C1": return (5.0, 7.0)
-    if level == "C2": return (7.0, 8.0)
-    return (3.0, 5.0)
+def get_difficulty_range(level_name: str) -> Tuple[float, float]:
+    mapping = {
+        "Початківець (A1)": (2.0, 3.0),
+        "Базовий (A2-B1)": (3.0, 5.0),
+        "Просунутий (B2-C1)": (5.0, 7.0),
+        "Експерт (C2)": (7.0, 8.0),
+    }
+    return mapping.get(level_name, (3.0, 5.0))
 
 def main():
-    # --- Sidebar ---
+    # --- Sidebar: Налаштування ---
     with st.sidebar:
-        st.header("Налаштування Симуляції")
+        st.header("⚙️ Налаштування Учня")
         
-        # Reset Button Logic (Trick with key)
-        if st.button("Reset to Defaults"):
-            st.session_state.clear()
-            st.rerun()
-
-        level = st.selectbox(
-            "Рівень Курсу (Difficulty)", 
-            ["A1", "A2-B1", "B2-C1", "C2"], 
-            index=1,
-            help="Визначає початкову складність (D) слів."
+        # 1. Рівень
+        level_input = st.selectbox(
+            "Ваш рівень англійської", 
+            ["Початківець (A1)", "Базовий (A2-B1)", "Просунутий (B2-C1)", "Експерт (C2)"], 
+            index=1
         )
 
-        request_retention = st.slider(
-            "Request Retention (R)", 
-            0.70, 0.99, 0.90, 0.01,
-            help="Цільовий рівень пам'яті. Чим вище, тим частіше повторення."
+        st.divider()
+        st.subheader("📅 Мій розклад")
+        
+        # 2. Розклад
+        training_days_per_week = st.slider(
+            "Скільки днів на тиждень ви вчитесь?", 
+            min_value=1, max_value=7, value=3,
+            help="Якщо сьогодні вихідний, слова переносяться на наступне заняття."
+        )
+        
+        max_cards_per_session = st.number_input(
+            "Ліміт карток за одне заняття",
+            min_value=10, max_value=200, value=30, step=5,
+            help="Максимальна кількість карток (повторення + нові), які ви готові пройти за один раз."
         )
 
-        initial_s_good = st.number_input(
-            "Initial Stability (Good)", 
-            value=4.0, step=0.5,
-            help="Інтервал (в днях) після першого 'Good'."
+        st.divider()
+        st.subheader("🧠 Якість навчання")
+        
+        retention_input = st.slider(
+            "Бажана надійність пам'яті (%)", 
+            70, 99, 90,
+            help="90% означає, що ви хочете пам'ятати слово в 9 випадках з 10 при наступній зустрічі."
         )
 
-        st.subheader("Профіль Учня (Ймовірності)")
-        col1, col2 = st.columns(2)
-        prob_again = col1.number_input("Again %", 0, 100, 10)
-        prob_hard = col2.number_input("Hard %", 0, 100, 15)
-        prob_good = col1.number_input("Good %", 0, 100, 60)
-        prob_easy = col2.number_input("Easy %", 0, 100, 15)
+        # 3. Ймовірності (приховані деталі)
+        with st.expander("Деталі успішності (Advanced)"):
+            st.write("Як часто ви помиляєтесь?")
+            prob_again = st.number_input("Забув / Помилка (%)", 0, 100, 15)
+            prob_hard = st.number_input("Важко згадати (%)", 0, 100, 15)
+            prob_good = st.number_input("Згадав нормально (%)", 0, 100, 55)
+            prob_easy = st.number_input("Дуже легко (%)", 0, 100, 15)
+            
+            if prob_again + prob_hard + prob_good + prob_easy != 100:
+                st.error("Сума має бути 100%!")
+                st.stop()
 
-        total_prob = prob_again + prob_hard + prob_good + prob_easy
-        if total_prob != 100:
-            st.error(f"Сума ймовірностей має бути 100%. Поточна: {total_prob}%")
-            run_sim = False
-        else:
-            st.success("Профіль валідний")
-            run_sim = st.button("Run Simulation", type="primary")
+        run_btn = st.button("🚀 Запустити прогноз", type="primary")
 
-    # --- Main Content ---
-    st.title("🧩 FSRS v4 Simulator")
-    st.markdown(f"**Scenario:** Learning **{DECK_SIZE} words** over **{SIMULATION_DAYS} days** | **Level:** {level}")
+    # --- Головний екран ---
+    st.title("🎓 Прогноз вивчення слів")
+    st.markdown(f"""
+    **Дано:** Колода з **{DECK_SIZE} слів**.  
+    **Ціль:** Закріпити їх у пам'яті (інтервал повторення > {int(MASTERY_THRESHOLD)} днів).  
+    **Режим:** {training_days_per_week} тренувань на тиждень, максимум {max_cards_per_session} слів за раз.
+    """)
 
-    if run_sim:
-        with st.spinner("Симуляція навчання..."):
-            # 1. Setup Simulation
+    if run_btn:
+        with st.spinner("Прораховуємо вашу криву навчання..."):
+            # Ініціалізація
             params = FSRSParams(
-                request_retention=request_retention,
-                initial_stability_good=initial_s_good
+                request_retention=retention_input / 100.0,
+                initial_stability_good=4.0
             )
             fsrs = FSRS(params)
             
-            min_d, max_d = get_difficulty_range(level)
+            min_d, max_d = get_difficulty_range(level_input)
             
-            # Generate Deck
+            # Генерація колоди
             deck = [Card(id=i, difficulty=random.uniform(min_d, max_d)) for i in range(DECK_SIZE)]
             
-            # Stats Containers
-            daily_reviews_count = np.zeros(SIMULATION_DAYS)
-            daily_mastered_count = np.zeros(SIMULATION_DAYS)
+            # Статистика по днях
+            stats_history = []
             
-            # Probabilities for np.random.choice
-            rating_probs = [prob_again/100, prob_hard/100, prob_good/100, prob_easy/100]
-            rating_choices = [1, 2, 3, 4]
+            probs = [prob_again/100, prob_hard/100, prob_good/100, prob_easy/100]
+            choices = [1, 2, 3, 4] # Again, Hard, Good, Easy
 
-            # 2. Simulation Loop (Day by Day)
-            # Щоб симуляція була цікавою, вводимо слова поступово (наприклад, 5 нових в день), 
-            # або всі відразу. Згідно з задачею "колода з 65 слів", припустимо, що користувач 
-            # починає вчити їх всі в перші дні (e.g., 10 new cards/day).
-            new_cards_per_day = 10 
-            
-            for day in range(SIMULATION_DAYS):
+            total_reviews_log = 0
+
+            # Цикл симуляції (365 днів)
+            for day in range(1, SIMULATION_DAYS + 1):
+                # 1. Перевірка: чи це день тренування?
+                # day % 7 == 0 (умовно неділя), якщо training_days_per_week < 7, робимо пропуски
+                # Логіка: просто беремо % 7. Якщо result < training_days, то вчимося. 
+                # (наприклад, 3 дні: 0, 1, 2 - вчимося (пн,вт,ср), 3,4,5,6 - ні. Це спрощення, але працює для навантаження).
+                is_training_day = (day % 7) < training_days_per_week
+                
+                mastered_today_count = 0
                 reviews_today = 0
                 
-                # A. Process Reviews (Due Cards)
-                for card in deck:
-                    if card.state == "New":
-                        continue
+                if is_training_day:
+                    # А. Збираємо картки, які треба повторити (Due)
+                    due_cards = []
+                    for card in deck:
+                        if card.state == "New": continue
+                        
+                        days_elapsed = day - card.last_review_day
+                        r = fsrs.calculate_retrievability(card.stability, days_elapsed)
+                        
+                        if r < params.request_retention:
+                            due_cards.append((card, r))
                     
-                    # Calculate R
-                    days_elapsed = day - card.last_review_day
-                    r = fsrs.calculate_retrievability(card.stability, days_elapsed)
+                    # Сортуємо за терміновістю (найменший R - найперші)
+                    due_cards.sort(key=lambda x: x[1])
                     
-                    # Check if due
-                    if r < request_retention:
-                        # Review happens
+                    # Б. Проходимо картки (Повторення), поважаючи ліміт сесії
+                    # Спочатку повторення, потім нові слова
+                    
+                    # Скільки місця лишилось в уроці?
+                    slots_remaining = max_cards_per_session
+                    
+                    # 1. Reviews
+                    for card, r in due_cards:
+                        if slots_remaining <= 0:
+                            break # Ліміт вичерпано, решта переноситься на наступний раз
+                        
+                        slots_remaining -= 1
                         reviews_today += 1
+                        total_reviews_log += 1
                         
-                        # Simulate User Rating
-                        rating = np.random.choice(rating_choices, p=rating_probs)
+                        # Симуляція відповіді
+                        rating = np.random.choice(choices, p=probs)
                         
-                        # Store old state for log (if selected for tracking)
-                        old_s = card.stability
-                        old_d = card.difficulty
+                        was_mastered = card.is_mastered
                         
-                        # Update S and D
+                        # FSRS update
                         new_s, new_d = fsrs.next_interval(card.stability, card.difficulty, rating, r)
-                        
                         card.stability = new_s
                         card.difficulty = new_d
                         card.last_review_day = day
-                        card.state = "Mastered" if card.stability > MASTERY_THRESHOLD else "Review"
                         
-                        # Log history
-                        card.history.append({
-                            "Day": day, "Action": ["Again", "Hard", "Good", "Easy"][rating-1],
-                            "R": round(r, 2), "Old S": round(old_s, 2), "New S": round(new_s, 2),
-                            "D": round(new_d, 2)
-                        })
+                        # Логіка помилки: якщо rating=1 (Again), користувач "перевчує" слово.
+                        # Технічно воно стає червоним, але ми зарахували це як 1 action.
+                        
+                        is_now_mastered = card.is_mastered
+                        
+                        # Якщо слово перейшло поріг САМЕ СЬОГОДНІ
+                        if not was_mastered and is_now_mastered:
+                            mastered_today_count += 1
+                        # Якщо слово забули (випало з Mastered) - це рідкість з порогом 21, але можливо
+                        if was_mastered and not is_now_mastered:
+                            mastered_today_count -= 1 
 
-                # B. Introduce New Cards
-                new_cards_reviewed = 0
-                for card in deck:
-                    if card.state == "New" and new_cards_reviewed < new_cards_per_day:
-                        # Initial Learning
+                    # 2. New Cards (якщо є місце)
+                    # Нові слова беремо тільки якщо немає завалу з повтореннями
+                    # Стратегія: лишати хоча б 3-5 слотів під нові, або заповнювати залишок.
+                    # Для простоти: заповнюємо залишок.
+                    
+                    new_cards_candidates = [c for c in deck if c.state == "New"]
+                    for card in new_cards_candidates:
+                        if slots_remaining <= 0:
+                            break
+                        
+                        slots_remaining -= 1
                         reviews_today += 1
-                        new_cards_reviewed += 1
+                        total_reviews_log += 1
                         
-                        # For simplicity, assume first rating follows prob distribution, 
-                        # but mostly usually Good/Easy for new easy words. Let's use same prob.
-                        rating = np.random.choice(rating_choices, p=rating_probs)
-                        
-                        # Init S, D
-                        # Note: D is already set by level, but S needs init.
-                        # If rating is 'Good' (3), S becomes initial_stability_good (user param)
+                        rating = np.random.choice(choices, p=probs)
+                        # Перше навчання
                         init_s, _ = fsrs.initial_params(rating)
-                        
                         card.stability = init_s
-                        # D updates slightly on first interaction too in full FSRS, but let's keep Level D dominant
-                        # or update slightly:
+                        # Трохи коригуємо D
                         card.difficulty = max(1.0, min(10.0, card.difficulty - 0.5 * (rating - 3)))
-
-                        card.state = "Review"
+                        card.state = "Learning"
                         card.last_review_day = day
                         
-                        card.history.append({
-                            "Day": day, "Action": f"New ({['Again', 'Hard', 'Good', 'Easy'][rating-1]})",
-                            "R": 0.0, "Old S": 0.0, "New S": round(init_s, 2),
-                            "D": round(card.difficulty, 2)
-                        })
+                        if card.is_mastered: # Майже неможливо з 1 разу, але для чистоти
+                            mastered_today_count += 1
 
-                daily_reviews_count[day] = reviews_today
-                
-                # Count Mastered
-                mastered_cnt = sum(1 for c in deck if c.is_mastered)
-                daily_mastered_count[day] = mastered_cnt
+                # Збираємо статистику на кінець дня
+                total_mastered = sum(1 for c in deck if c.is_mastered)
+                stats_history.append({
+                    "Day": day,
+                    "Total Mastered": total_mastered,
+                    "Newly Mastered": max(0, mastered_today_count), # Тільки позитивні для графіка
+                    "Workload": reviews_today
+                })
 
-            # ==========================================
-            # 4. VISUALIZATION & OUTPUT
-            # ==========================================
+            # --- 4. ВІЗУАЛІЗАЦІЯ РЕЗУЛЬТАТІВ ---
             
-            # --- KPI Metrics ---
-            total_reviews = int(np.sum(daily_reviews_count))
-            final_mastered = daily_mastered_count[-1]
-            avg_stability = np.mean([c.stability for c in deck])
-            mastered_pct = (final_mastered / DECK_SIZE) * 100
-
-            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-            kpi1.metric("Total Reviews", f"{total_reviews}")
-            kpi2.metric("Mastered Words", f"{int(final_mastered)} / {DECK_SIZE}", f"{mastered_pct:.1f}%")
-            kpi3.metric("Avg Stability (Days)", f"{avg_stability:.1f}")
-            kpi4.metric("Avg Reviews/Card", f"{total_reviews / DECK_SIZE:.1f}")
-
-            # --- Chart 1: Reviews per Day (Bar) ---
-            st.subheader("📊 Review Load (Навантаження)")
-            df_reviews = pd.DataFrame({
-                "Day": range(1, SIMULATION_DAYS + 1),
-                "Reviews": daily_reviews_count
-            })
-            fig_bar = px.bar(df_reviews, x="Day", y="Reviews", title="Кількість повторень на день")
-            fig_bar.update_traces(marker_color='#4A90E2')
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-            # --- Chart 2: Learning Progress (Area) ---
-            st.subheader("📈 Learning Progress (Mastery)")
-            df_mastery = pd.DataFrame({
-                "Day": range(1, SIMULATION_DAYS + 1),
-                "Mastered Words": daily_mastered_count
-            })
-            fig_area = px.area(
-                df_mastery, x="Day", y="Mastered Words", 
-                title="Зростання кількості вивчених слів (S > 21 days)",
-                range_y=[0, DECK_SIZE]
-            )
-            fig_area.update_traces(line_color='#2ECC71', fillcolor='rgba(46, 204, 113, 0.3)')
-            st.plotly_chart(fig_area, use_container_width=True)
-
-            # --- Detailed Card Log ---
-            st.subheader("🔍 Детальний лог випадкової картки")
-            # Filter cards that have history
-            active_cards = [c for c in deck if c.history]
-            if active_cards:
-                sample_card = random.choice(active_cards)
-                st.markdown(f"**Card ID:** {sample_card.id} | **Final Difficulty:** {sample_card.difficulty:.2f} | **Final Stability:** {sample_card.stability:.2f}")
-                
-                df_log = pd.DataFrame(sample_card.history)
-                # Calculate Next Interval for display
-                df_log["Interval"] = (df_log["New S"]).astype(float).round(1)
-                
-                st.dataframe(
-                    df_log[["Day", "Action", "D", "Old S", "New S", "Interval"]],
-                    use_container_width=True
-                )
+            df = pd.DataFrame(stats_history)
+            
+            # KPI Block
+            final_mastered = df["Total Mastered"].iloc[-1]
+            days_to_finish = df[df["Total Mastered"] == DECK_SIZE]["Day"].min()
+            
+            if pd.isna(days_to_finish):
+                finish_text = "Більше року"
             else:
-                st.info("Ще не було взаємодій з картками.")
+                finish_text = f"{int(days_to_finish)} днів"
 
-    else:
-        st.info("👈 Налаштуйте параметри в сайдбарі та натисніть 'Run Simulation'")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Вивчено слів (Всього)", f"{final_mastered} / {DECK_SIZE}", help="Слова, які ви будете пам'ятати довше 3 тижнів.")
+            col2.metric("Час до повного вивчення", finish_text, help="Скільки днів треба, щоб всі 65 слів перейшли в статус 'Вивчено'.")
+            col3.metric("Всього карток пройдено", total_reviews_log, help="Сума всіх кліків по кнопках 'Знаю'/'Не знаю'.")
+
+            st.divider()
+
+            # Chart 1: Daily Wins
+            st.subheader("📈 Скільки слів я буду вивчати щодня?")
+            st.caption("Цей графік показує, у які дні слова переходять з категорії 'Вчу' в категорію 'Вивчив'.")
+            
+            # Агрегація по тижнях для кращого вигляду (або ковзне середнє), 
+            # але для 65 слів краще залишити дні, просто відфільтрувати нулі.
+            fig_daily = px.bar(
+                df, x="Day", y="Newly Mastered",
+                title="Нові вивчені слова (по днях)",
+                labels={"Newly Mastered": "Слів вивчено", "Day": "День"},
+                color_discrete_sequence=["#2ECC71"]
+            )
+            fig_daily.update_layout(bargap=0.2)
+            st.plotly_chart(fig_daily, use_container_width=True)
+
+            # Chart 2: Cumulative Progress
+            st.subheader("🏔️ Загальний прогрес")
+            st.caption("Накопичувальний ефект. Ваша ціль - досягти плато (65 слів).")
+            
+            fig_cum = px.area(
+                df, x="Day", y="Total Mastered",
+                title="Динаміка зростання словникового запасу",
+                labels={"Total Mastered": "Всього вивчено слів", "Day": "День"},
+                range_y=[0, DECK_SIZE + 5],
+                color_discrete_sequence=["#3498DB"]
+            )
+            # Додаємо лінію цілі
+            fig_cum.add_hline(y=DECK_SIZE, line_dash="dash", line_color="gray", annotation_text="Ціль (65 слів)")
+            st.plotly_chart(fig_cum, use_container_width=True)
+
+            # Chart 3: Workload
+            st.subheader("🏋️ Навантаження (Карток за заняття)")
+            st.caption("Скільки карток вам доведеться проходити в активні дні.")
+            
+            # Фільтруємо, показуємо тільки дні тренувань (де Workload > 0)
+            df_work = df[df["Workload"] > 0]
+            fig_work = px.bar(
+                df_work, x="Day", y="Workload",
+                title="Кількість повторень на кожному занятті",
+                labels={"Workload": "Карток (Повторення + Нові)", "Day": "День"},
+                color_discrete_sequence=["#F1C40F"]
+            )
+            # Лінія ліміту
+            fig_work.add_hline(y=max_cards_per_session, line_dash="dot", line_color="red", annotation_text="Ваш ліміт")
+            st.plotly_chart(fig_work, use_container_width=True)
+
+            # Висновки текстом
+            st.success(f"""
+            **Висновки аналітика:**
+            1. При розкладі **{training_days_per_week} разів на тиждень** та ліміті **{max_cards_per_session} карток**, 
+            ви вивчите всі 65 слів приблизно за **{finish_text}**.
+            2. Всього вам доведеться зробити близько **{total_reviews_log} повторень** (в середньому {total_reviews_log/DECK_SIZE:.1f} разів на одне слово), щоб закріпити їх надійно.
+            """)
 
 if __name__ == "__main__":
     main()
