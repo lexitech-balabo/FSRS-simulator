@@ -3,7 +3,6 @@ import random
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 from dataclasses import dataclass, field
 from typing import List, Tuple
 
@@ -25,7 +24,6 @@ DEFAULT_WEIGHTS = [
     2.18, 0.05, 0.34, 1.26, 0.29, 2.61
 ]
 
-MASTERY_THRESHOLD = 21.0  # Слово вважається вивченим, якщо інтервал > 21 дня
 DECK_SIZE = 65            # Розмір колоди
 SIMULATION_DAYS = 365     # Період прогнозу
 
@@ -58,6 +56,7 @@ class FSRS:
 
         # Оновлення Міцності пам'яті (S)
         if rating == 1: # Забув (Again)
+            # Для спрощення і стабільності симуляції
             s_new = self.p.w[11] * (d_new ** -self.p.w[12]) * ((s + 1) ** self.p.w[13]) * np.exp(self.p.w[14] * (1 - r))
         else:
             if rating == 2: factor = self.p.w[8] 
@@ -85,11 +84,6 @@ class Card:
     stability: float = 0.0
     state: str = "New" # New, Learning, Mastered
     last_review_day: int = -1
-    history: List[dict] = field(default_factory=list)
-
-    @property
-    def is_mastered(self):
-        return self.stability > MASTERY_THRESHOLD
 
 # ==========================================
 # 3. ІНТЕРФЕЙС ТА СИМУЛЯЦІЯ
@@ -117,19 +111,28 @@ def main():
         )
 
         st.divider()
+        st.subheader("🎯 Ціль навчання")
+        
+        # --- NEW CONTROL HERE ---
+        mastery_threshold = st.slider(
+            "Вважати слово вивченим, коли інтервал > (днів)",
+            min_value=7, max_value=90, value=21, step=7,
+            help="Як довго ви хочете пам'ятати слово без підказок, щоб вважати його 'Вивченим'? Чим більше число, тим надійніші знання, але довше навчання."
+        )
+        # ------------------------
+
+        st.divider()
         st.subheader("📅 Мій розклад")
         
         # 2. Розклад
         training_days_per_week = st.slider(
             "Скільки днів на тиждень ви вчитесь?", 
-            min_value=1, max_value=7, value=3,
-            help="Якщо сьогодні вихідний, слова переносяться на наступне заняття."
+            min_value=1, max_value=7, value=3
         )
         
         max_cards_per_session = st.number_input(
             "Ліміт карток за одне заняття",
-            min_value=10, max_value=200, value=30, step=5,
-            help="Максимальна кількість карток (повторення + нові), які ви готові пройти за один раз."
+            min_value=10, max_value=200, value=30, step=5
         )
 
         st.divider()
@@ -141,7 +144,6 @@ def main():
             help="90% означає, що ви хочете пам'ятати слово в 9 випадках з 10 при наступній зустрічі."
         )
 
-        # 3. Ймовірності (приховані деталі)
         with st.expander("Деталі успішності (Advanced)"):
             st.write("Як часто ви помиляєтесь?")
             prob_again = st.number_input("Забув / Помилка (%)", 0, 100, 15)
@@ -159,7 +161,7 @@ def main():
     st.title("🎓 Прогноз вивчення слів")
     st.markdown(f"""
     **Дано:** Колода з **{DECK_SIZE} слів**.  
-    **Ціль:** Закріпити їх у пам'яті (інтервал повторення > {int(MASTERY_THRESHOLD)} днів).  
+    **Ціль:** Закріпити їх у пам'яті (інтервал повторення > **{mastery_threshold} днів**).  
     **Режим:** {training_days_per_week} тренувань на тиждень, максимум {max_cards_per_session} слів за раз.
     """)
 
@@ -177,7 +179,6 @@ def main():
             # Генерація колоди
             deck = [Card(id=i, difficulty=random.uniform(min_d, max_d)) for i in range(DECK_SIZE)]
             
-            # Статистика по днях
             stats_history = []
             
             probs = [prob_again/100, prob_hard/100, prob_good/100, prob_easy/100]
@@ -187,10 +188,6 @@ def main():
 
             # Цикл симуляції (365 днів)
             for day in range(1, SIMULATION_DAYS + 1):
-                # 1. Перевірка: чи це день тренування?
-                # day % 7 == 0 (умовно неділя), якщо training_days_per_week < 7, робимо пропуски
-                # Логіка: просто беремо % 7. Якщо result < training_days, то вчимося. 
-                # (наприклад, 3 дні: 0, 1, 2 - вчимося (пн,вт,ср), 3,4,5,6 - ні. Це спрощення, але працює для навантаження).
                 is_training_day = (day % 7) < training_days_per_week
                 
                 mastered_today_count = 0
@@ -208,87 +205,72 @@ def main():
                         if r < params.request_retention:
                             due_cards.append((card, r))
                     
-                    # Сортуємо за терміновістю (найменший R - найперші)
+                    # Сортуємо
                     due_cards.sort(key=lambda x: x[1])
                     
-                    # Б. Проходимо картки (Повторення), поважаючи ліміт сесії
-                    # Спочатку повторення, потім нові слова
-                    
-                    # Скільки місця лишилось в уроці?
                     slots_remaining = max_cards_per_session
                     
                     # 1. Reviews
                     for card, r in due_cards:
-                        if slots_remaining <= 0:
-                            break # Ліміт вичерпано, решта переноситься на наступний раз
+                        if slots_remaining <= 0: break
                         
                         slots_remaining -= 1
                         reviews_today += 1
                         total_reviews_log += 1
                         
-                        # Симуляція відповіді
                         rating = np.random.choice(choices, p=probs)
                         
-                        was_mastered = card.is_mastered
+                        # --- Logic Check using dynamic threshold ---
+                        was_mastered = card.stability > mastery_threshold
                         
-                        # FSRS update
                         new_s, new_d = fsrs.next_interval(card.stability, card.difficulty, rating, r)
                         card.stability = new_s
                         card.difficulty = new_d
                         card.last_review_day = day
                         
-                        # Логіка помилки: якщо rating=1 (Again), користувач "перевчує" слово.
-                        # Технічно воно стає червоним, але ми зарахували це як 1 action.
+                        is_now_mastered = card.stability > mastery_threshold
                         
-                        is_now_mastered = card.is_mastered
-                        
-                        # Якщо слово перейшло поріг САМЕ СЬОГОДНІ
                         if not was_mastered and is_now_mastered:
                             mastered_today_count += 1
-                        # Якщо слово забули (випало з Mastered) - це рідкість з порогом 21, але можливо
                         if was_mastered and not is_now_mastered:
                             mastered_today_count -= 1 
 
-                    # 2. New Cards (якщо є місце)
-                    # Нові слова беремо тільки якщо немає завалу з повтореннями
-                    # Стратегія: лишати хоча б 3-5 слотів під нові, або заповнювати залишок.
-                    # Для простоти: заповнюємо залишок.
-                    
+                    # 2. New Cards
                     new_cards_candidates = [c for c in deck if c.state == "New"]
                     for card in new_cards_candidates:
-                        if slots_remaining <= 0:
-                            break
+                        if slots_remaining <= 0: break
                         
                         slots_remaining -= 1
                         reviews_today += 1
                         total_reviews_log += 1
                         
                         rating = np.random.choice(choices, p=probs)
-                        # Перше навчання
                         init_s, _ = fsrs.initial_params(rating)
                         card.stability = init_s
-                        # Трохи коригуємо D
                         card.difficulty = max(1.0, min(10.0, card.difficulty - 0.5 * (rating - 3)))
                         card.state = "Learning"
                         card.last_review_day = day
                         
-                        if card.is_mastered: # Майже неможливо з 1 разу, але для чистоти
+                        # Check mastery for newly added card (rare, but possible if init_s is high and threshold low)
+                        if card.stability > mastery_threshold:
                             mastered_today_count += 1
 
-                # Збираємо статистику на кінець дня
-                total_mastered = sum(1 for c in deck if c.is_mastered)
+                # Збираємо статистику
+                # Check mastery using dynamic threshold
+                total_mastered = sum(1 for c in deck if c.stability > mastery_threshold)
+                
                 stats_history.append({
                     "Day": day,
                     "Total Mastered": total_mastered,
-                    "Newly Mastered": max(0, mastered_today_count), # Тільки позитивні для графіка
+                    "Newly Mastered": max(0, mastered_today_count),
                     "Workload": reviews_today
                 })
 
-            # --- 4. ВІЗУАЛІЗАЦІЯ РЕЗУЛЬТАТІВ ---
+            # --- 4. ВІЗУАЛІЗАЦІЯ ---
             
             df = pd.DataFrame(stats_history)
             
-            # KPI Block
+            # KPI
             final_mastered = df["Total Mastered"].iloc[-1]
             days_to_finish = df[df["Total Mastered"] == DECK_SIZE]["Day"].min()
             
@@ -298,18 +280,14 @@ def main():
                 finish_text = f"{int(days_to_finish)} днів"
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Вивчено слів (Всього)", f"{final_mastered} / {DECK_SIZE}", help="Слова, які ви будете пам'ятати довше 3 тижнів.")
-            col2.metric("Час до повного вивчення", finish_text, help="Скільки днів треба, щоб всі 65 слів перейшли в статус 'Вивчено'.")
-            col3.metric("Всього карток пройдено", total_reviews_log, help="Сума всіх кліків по кнопках 'Знаю'/'Не знаю'.")
+            col1.metric(f"Вивчено слів (>{mastery_threshold} дн.)", f"{final_mastered} / {DECK_SIZE}")
+            col2.metric("Час до повного вивчення", finish_text)
+            col3.metric("Всього карток пройдено", total_reviews_log)
 
             st.divider()
 
             # Chart 1: Daily Wins
             st.subheader("📈 Скільки слів я буду вивчати щодня?")
-            st.caption("Цей графік показує, у які дні слова переходять з категорії 'Вчу' в категорію 'Вивчив'.")
-            
-            # Агрегація по тижнях для кращого вигляду (або ковзне середнє), 
-            # але для 65 слів краще залишити дні, просто відфільтрувати нулі.
             fig_daily = px.bar(
                 df, x="Day", y="Newly Mastered",
                 title="Нові вивчені слова (по днях)",
@@ -319,44 +297,32 @@ def main():
             fig_daily.update_layout(bargap=0.2)
             st.plotly_chart(fig_daily, use_container_width=True)
 
-            # Chart 2: Cumulative Progress
+            # Chart 2: Cumulative
             st.subheader("🏔️ Загальний прогрес")
-            st.caption("Накопичувальний ефект. Ваша ціль - досягти плато (65 слів).")
-            
             fig_cum = px.area(
                 df, x="Day", y="Total Mastered",
-                title="Динаміка зростання словникового запасу",
+                title=f"Слова з міцністю пам'яті > {mastery_threshold} днів",
                 labels={"Total Mastered": "Всього вивчено слів", "Day": "День"},
                 range_y=[0, DECK_SIZE + 5],
                 color_discrete_sequence=["#3498DB"]
             )
-            # Додаємо лінію цілі
             fig_cum.add_hline(y=DECK_SIZE, line_dash="dash", line_color="gray", annotation_text="Ціль (65 слів)")
             st.plotly_chart(fig_cum, use_container_width=True)
 
             # Chart 3: Workload
-            st.subheader("🏋️ Навантаження (Карток за заняття)")
-            st.caption("Скільки карток вам доведеться проходити в активні дні.")
-            
-            # Фільтруємо, показуємо тільки дні тренувань (де Workload > 0)
+            st.subheader("🏋️ Навантаження")
             df_work = df[df["Workload"] > 0]
-            fig_work = px.bar(
-                df_work, x="Day", y="Workload",
-                title="Кількість повторень на кожному занятті",
-                labels={"Workload": "Карток (Повторення + Нові)", "Day": "День"},
-                color_discrete_sequence=["#F1C40F"]
-            )
-            # Лінія ліміту
-            fig_work.add_hline(y=max_cards_per_session, line_dash="dot", line_color="red", annotation_text="Ваш ліміт")
-            st.plotly_chart(fig_work, use_container_width=True)
-
-            # Висновки текстом
-            st.success(f"""
-            **Висновки аналітика:**
-            1. При розкладі **{training_days_per_week} разів на тиждень** та ліміті **{max_cards_per_session} карток**, 
-            ви вивчите всі 65 слів приблизно за **{finish_text}**.
-            2. Всього вам доведеться зробити близько **{total_reviews_log} повторень** (в середньому {total_reviews_log/DECK_SIZE:.1f} разів на одне слово), щоб закріпити їх надійно.
-            """)
+            if not df_work.empty:
+                fig_work = px.bar(
+                    df_work, x="Day", y="Workload",
+                    title="Кількість повторень на кожному занятті",
+                    labels={"Workload": "Карток (Повторення + Нові)", "Day": "День"},
+                    color_discrete_sequence=["#F1C40F"]
+                )
+                fig_work.add_hline(y=max_cards_per_session, line_dash="dot", line_color="red", annotation_text="Ваш ліміт")
+                st.plotly_chart(fig_work, use_container_width=True)
+            else:
+                st.info("Немає даних про навантаження (можливо, ліміт замалий або днів недостатньо).")
 
 if __name__ == "__main__":
     main()
