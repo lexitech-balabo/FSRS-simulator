@@ -81,7 +81,7 @@ class Card:
     id: int
     difficulty: float
     stability: float = 0.0
-    state: str = "New" # New, Learning, Mastered
+    state: str = "New" 
     last_review_day: int = -1
 
 # ==========================================
@@ -102,7 +102,6 @@ def main():
     with st.sidebar:
         st.header("⚙️ Налаштування Учня")
         
-        # 1. Рівень
         level_input = st.selectbox(
             "Ваш рівень англійської", 
             ["Початківець (A1)", "Базовий (A2-B1)", "Просунутий (B2-C1)", "Експерт (C2)"], 
@@ -112,18 +111,17 @@ def main():
         st.divider()
         st.subheader("🎯 Ціль навчання")
         
-        # --- CHANGED STEP TO 1 ---
+        # Додав key="mastery_slider_v2", щоб скинути кеш віджета і гарантувати крок 1
         mastery_threshold = st.slider(
             "Вважати слово вивченим, коли інтервал > (днів)",
             min_value=7, max_value=90, value=21, step=1,
-            help="Як довго ви хочете пам'ятати слово без підказок, щоб вважати його 'Вивченим'? Чим більше число, тим надійніші знання, але довше навчання."
+            key="mastery_slider_v2", 
+            help="Інтервал у днях. Тепер можна вибирати з точністю до 1 дня."
         )
-        # ------------------------
 
         st.divider()
         st.subheader("📅 Мій розклад")
         
-        # 2. Розклад
         training_days_per_week = st.slider(
             "Скільки днів на тиждень ви вчитесь?", 
             min_value=1, max_value=7, value=3
@@ -166,7 +164,6 @@ def main():
 
     if run_btn:
         with st.spinner("Прораховуємо вашу криву навчання..."):
-            # Ініціалізація
             params = FSRSParams(
                 request_retention=retention_input / 100.0,
                 initial_stability_good=4.0
@@ -185,7 +182,6 @@ def main():
 
             total_reviews_log = 0
 
-            # Цикл симуляції (365 днів)
             for day in range(1, SIMULATION_DAYS + 1):
                 is_training_day = (day % 7) < training_days_per_week
                 
@@ -193,7 +189,7 @@ def main():
                 reviews_today = 0
                 
                 if is_training_day:
-                    # А. Збираємо картки, які треба повторити (Due)
+                    # Due cards
                     due_cards = []
                     for card in deck:
                         if card.state == "New": continue
@@ -204,7 +200,6 @@ def main():
                         if r < params.request_retention:
                             due_cards.append((card, r))
                     
-                    # Сортуємо
                     due_cards.sort(key=lambda x: x[1])
                     
                     slots_remaining = max_cards_per_session
@@ -219,7 +214,6 @@ def main():
                         
                         rating = np.random.choice(choices, p=probs)
                         
-                        # --- Logic Check using dynamic threshold ---
                         was_mastered = card.stability > mastery_threshold
                         
                         new_s, new_d = fsrs.next_interval(card.stability, card.difficulty, rating, r)
@@ -250,12 +244,10 @@ def main():
                         card.state = "Learning"
                         card.last_review_day = day
                         
-                        # Check mastery for newly added card (rare, but possible if init_s is high and threshold low)
                         if card.stability > mastery_threshold:
                             mastered_today_count += 1
 
-                # Збираємо статистику
-                # Check mastery using dynamic threshold
+                # Stats
                 total_mastered = sum(1 for c in deck if c.stability > mastery_threshold)
                 
                 stats_history.append({
@@ -265,18 +257,13 @@ def main():
                     "Workload": reviews_today
                 })
 
-            # --- 4. ВІЗУАЛІЗАЦІЯ ---
-            
+            # --- Visualization ---
             df = pd.DataFrame(stats_history)
             
-            # KPI
             final_mastered = df["Total Mastered"].iloc[-1]
             days_to_finish = df[df["Total Mastered"] == DECK_SIZE]["Day"].min()
             
-            if pd.isna(days_to_finish):
-                finish_text = "Більше року"
-            else:
-                finish_text = f"{int(days_to_finish)} днів"
+            finish_text = f"{int(days_to_finish)} днів" if not pd.isna(days_to_finish) else "Більше року"
 
             col1, col2, col3 = st.columns(3)
             col1.metric(f"Вивчено слів (>{mastery_threshold} дн.)", f"{final_mastered} / {DECK_SIZE}")
@@ -285,7 +272,6 @@ def main():
 
             st.divider()
 
-            # Chart 1: Daily Wins
             st.subheader("📈 Скільки слів я буду вивчати щодня?")
             fig_daily = px.bar(
                 df, x="Day", y="Newly Mastered",
@@ -296,7 +282,6 @@ def main():
             fig_daily.update_layout(bargap=0.2)
             st.plotly_chart(fig_daily, use_container_width=True)
 
-            # Chart 2: Cumulative
             st.subheader("🏔️ Загальний прогрес")
             fig_cum = px.area(
                 df, x="Day", y="Total Mastered",
@@ -308,7 +293,6 @@ def main():
             fig_cum.add_hline(y=DECK_SIZE, line_dash="dash", line_color="gray", annotation_text="Ціль (65 слів)")
             st.plotly_chart(fig_cum, use_container_width=True)
 
-            # Chart 3: Workload
             st.subheader("🏋️ Навантаження")
             df_work = df[df["Workload"] > 0]
             if not df_work.empty:
@@ -321,7 +305,7 @@ def main():
                 fig_work.add_hline(y=max_cards_per_session, line_dash="dot", line_color="red", annotation_text="Ваш ліміт")
                 st.plotly_chart(fig_work, use_container_width=True)
             else:
-                st.info("Немає даних про навантаження (можливо, ліміт замалий або днів недостатньо).")
+                st.info("Немає даних про навантаження.")
 
 if __name__ == "__main__":
     main()
